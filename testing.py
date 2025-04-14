@@ -1,4 +1,4 @@
-git commit -m "first commit"import tqdm
+import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -216,7 +216,7 @@ class CustomImageDataset(Dataset):
         image = np.array(image).reshape(600, 600)
         #image = np.expand_dims(image, axis=0)
         image = image[:256,:256]
-        print(image.shape)
+        #print(image.shape)
         # Convert to PyTorch tensor and add channel dimension
         image = torch.from_numpy(image).float().unsqueeze(0)
 
@@ -267,7 +267,7 @@ sigma =  25.0#@param {'type':'number'}
 marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma)
 diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
 
-batch_size = 5
+batch_size = 30
 
 dataset = CustomImageDataset('/home/ppxjf3/diffusion_GAN/','deltaTb_z12.000_N600_L200.0.dat')
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -277,7 +277,7 @@ score_model = score_model.to(DEVICE)
 
 optimizer = Adam(score_model.parameters(), lr=1e-4)
 
-tqdm_epoch = tqdm.trange(2)
+tqdm_epoch = tqdm.trange(5)
 for epoch in tqdm_epoch:
   avg_loss = 0.
   num_items = 0
@@ -371,11 +371,8 @@ samples = sampler(score_model,
                   sample_batch_size, 
                   device=DEVICE)
 
-## Sample visualization.
 print(samples.shape)
+from torchvision.utils import save_image
 
-import matplotlib.pyplot as plt
-
-plt.figure()
-plt.imshow(samples[0,0,:,:])
-plt.savefig('testing_image_generation.png', dpi=330)
+img1 = samples[0] 
+save_image(img1, 'img1.png')
