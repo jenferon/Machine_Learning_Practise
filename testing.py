@@ -1,4 +1,4 @@
-import tqdm
+git commit -m "first commit"import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -379,4 +379,3 @@ import matplotlib.pyplot as plt
 plt.figure()
 plt.imshow(samples[0,0,:,:])
 plt.savefig('testing_image_generation.png', dpi=330)
-plt.show()
