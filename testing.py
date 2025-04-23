@@ -10,19 +10,19 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 import functools
+import matplotlib.pyplot as plt 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(DEVICE)
+IMG_size_learning = 256
+IMG_size_output = 128
 
-#@title Defining a time-dependent score-based model (double click to expand or collapse)
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-
-import torch.nn.functional as F
-
+# explicit function to normalize array
+def normalize_2d(matrix):
+    norm = np.linalg.norm(matrix)
+    matrix = matrix/norm  # normalized matrix
+    return matrix
+  
 def diffusion_coeff(t, sigma):
   """Compute the diffusion coefficient of our SDE.
 
@@ -70,6 +70,7 @@ def match_tensor_shape(source, target):
     
     return source
 
+#classes for use within U-net
 class GaussianFourierProjection(nn.Module):
   """Gaussian random features for encoding time steps."""  
   def __init__(self, embed_dim, scale=30.):
@@ -81,7 +82,6 @@ class GaussianFourierProjection(nn.Module):
     x_proj = x[:, None] * self.W[None, :] * 2 * np.pi
     return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
-
 class Dense(nn.Module):
   """A fully connected layer that reshapes outputs to feature maps."""
   def __init__(self, input_dim, output_dim):
@@ -90,11 +90,11 @@ class Dense(nn.Module):
   def forward(self, x):
     return self.dense(x)[..., None, None]
 
-
+#U-Net
 class ScoreNet(nn.Module):
   """A time-dependent score-based model built upon U-Net architecture."""
 
-  def __init__(self, marginal_prob_std, channels=[32, 64, 128, 256], embed_dim=256):
+  def __init__(self, marginal_prob_std, channels=[16, 32, 64, 128, IMG_size_learning], embed_dim=IMG_size_learning):
     """Initialize a time-dependent score-based network.
 
     Args:
@@ -111,27 +111,41 @@ class ScoreNet(nn.Module):
     self.conv1 = nn.Conv2d(1, channels[0], 3, stride=1, bias=False)
     self.dense1 = Dense(embed_dim, channels[0])
     self.gnorm1 = nn.GroupNorm(4, num_channels=channels[0])
+    
     self.conv2 = nn.Conv2d(channels[0], channels[1], 3, stride=2, bias=False)
     self.dense2 = Dense(embed_dim, channels[1])
-    self.gnorm2 = nn.GroupNorm(32, num_channels=channels[1])
+    self.gnorm2 = nn.GroupNorm(8, num_channels=channels[1])
+    
     self.conv3 = nn.Conv2d(channels[1], channels[2], 3, stride=2, bias=False)
     self.dense3 = Dense(embed_dim, channels[2])
-    self.gnorm3 = nn.GroupNorm(32, num_channels=channels[2])
+    self.gnorm3 = nn.GroupNorm(16, num_channels=channels[2])
+    
     self.conv4 = nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
     self.dense4 = Dense(embed_dim, channels[3])
-    self.gnorm4 = nn.GroupNorm(32, num_channels=channels[3])    
+    self.gnorm4 = nn.GroupNorm(32, num_channels=channels[3])
+    
+    self.conv5 = nn.Conv2d(channels[3], channels[4], 3, stride=2, bias=False)
+    self.dense5 = Dense(embed_dim, channels[4])
+    self.gnorm5 = nn.GroupNorm(32, num_channels=channels[4])
 
     # Decoding layers where the resolution increases
-    self.tconv4 = nn.ConvTranspose2d(channels[3], channels[2], 3, stride=2, bias=False)
-    self.dense5 = Dense(embed_dim, channels[2])
-    self.tgnorm4 = nn.GroupNorm(32, num_channels=channels[2])
-    self.tconv3 = nn.ConvTranspose2d(channels[2] + channels[2], channels[1], 3, stride=2, bias=False)    
-    self.dense6 = Dense(embed_dim, channels[1])
-    self.tgnorm3 = nn.GroupNorm(32, num_channels=channels[1])
-    self.tconv2 = nn.ConvTranspose2d(channels[1] + channels[1], channels[0], 3, stride=2, bias=False)    
-    self.dense7 = Dense(embed_dim, channels[0])
-    self.tgnorm2 = nn.GroupNorm(32, num_channels=channels[0])
-    self.tconv1 = nn.ConvTranspose2d(channels[0] + channels[0], 1, 3, stride=1)
+    self.tconv5 = nn.ConvTranspose2d(channels[4], channels[3], 3, stride=2, bias=False)
+    self.dense6 = Dense(embed_dim, channels[3])
+    self.tgnorm5 = nn.GroupNorm(32, num_channels=channels[3])
+    
+    self.tconv4 = nn.ConvTranspose2d(channels[3]*2, channels[2], 3, stride=2, bias=False)
+    self.dense7 = Dense(embed_dim, channels[2])
+    self.tgnorm4 = nn.GroupNorm(16, num_channels=channels[2])
+    
+    self.tconv3 = nn.ConvTranspose2d(channels[2]*2, channels[1], 3, stride=2, bias=False)    
+    self.dense8 = Dense(embed_dim, channels[1])
+    self.tgnorm3 = nn.GroupNorm(8, num_channels=channels[1])
+    
+    self.tconv2 = nn.ConvTranspose2d(channels[1]*2, channels[0], 3, stride=2, bias=False)    
+    self.dense9 = Dense(embed_dim, channels[0])
+    self.tgnorm2 = nn.GroupNorm(4, num_channels=channels[0])
+    
+    self.tconv1 = nn.ConvTranspose2d(channels[0]*2, 1, 3, stride=1, padding=1)
     
     # The swish activation function
     self.act = lambda x: x * torch.sigmoid(x)
@@ -139,51 +153,27 @@ class ScoreNet(nn.Module):
   
   def forward(self, x, t): 
     # Obtain the Gaussian random feature embedding for t   
-    embed = self.act(self.embed(t))    
-    # Encoding path
-    h1 = self.conv1(x)    
-    ## Incorporate information from t
-    h1 += self.dense1(embed)
-    ## Group normalization
-    h1 = self.gnorm1(h1)
-    h1 = self.act(h1)
-    h2 = self.conv2(h1)
-    #print(h2.shape)
-    h2 += self.dense2(embed)
-    #print(h2.shape)
-    h2 = self.gnorm2(h2)
-    #print(h2.shape)
-    h2 = self.act(h2)
-    h3 = self.conv3(h2)
-    h3 += self.dense3(embed)
-    h3 = self.gnorm3(h3)
-    h3 = self.act(h3)
-    h4 = self.conv4(h3)
-    h4 += self.dense4(embed)
-    h4 = self.gnorm4(h4)
-    h4 = self.act(h4)
+    embed = self.act(self.embed(t))    # Encoder
+    h1 = self.act(self.gnorm1(self.conv1(x) + self.dense1(embed)))
+    h2 = self.act(self.gnorm2(self.conv2(h1) + self.dense2(embed)))
+    h3 = self.act(self.gnorm3(self.conv3(h2) + self.dense3(embed)))
+    h4 = self.act(self.gnorm4(self.conv4(h3) + self.dense4(embed)))
+    h5 = self.act(self.gnorm5(self.conv5(h4) + self.dense5(embed)))
 
-    # Decoding path
-    h = self.tconv4(h4)
-    ## Skip connection from the encoding path
-    h += self.dense5(embed)
-    h = self.tgnorm4(h)
-    h = self.act(h)
+    # Decoder
+    h = self.act(self.tgnorm5(self.tconv5(h5) + self.dense6(embed)))
+    h = match_tensor_shape(h, h4)
+    h = self.act(self.tgnorm4(self.tconv4(torch.cat([h, h4], dim=1)) + self.dense7(embed)))
     h = match_tensor_shape(h, h3)
-    h = self.tconv3(torch.cat([h, h3], dim=1))
-    h += self.dense6(embed)
-    h = self.tgnorm3(h)
-    h = self.act(h)
+    h = self.act(self.tgnorm3(self.tconv3(torch.cat([h, h3], dim=1)) + self.dense8(embed)))
     h = match_tensor_shape(h, h2)
-    h = self.tconv2(torch.cat([h, h2], dim=1))
-    h += self.dense7(embed)
-    h = self.tgnorm2(h)
-    h = self.act(h)
+    h = self.act(self.tgnorm2(self.tconv2(torch.cat([h, h2], dim=1)) + self.dense9(embed)))
     h = match_tensor_shape(h, h1)
     h = self.tconv1(torch.cat([h, h1], dim=1))
 
     # Normalize output
     h = h / self.marginal_prob_std(t)[:, None, None, None]
+    h = F.interpolate(h, size=x.shape[2:], mode='bilinear', align_corners=False)
     return h
 
 class CustomImageDataset(Dataset):
@@ -215,8 +205,7 @@ class CustomImageDataset(Dataset):
         image = struct.unpack('f' * (600 * 600), data)
         image = np.array(image).reshape(600, 600)
         #image = np.expand_dims(image, axis=0)
-        image = image[:256,:256]
-        #print(image.shape)
+        image = normalize_2d(image[:IMG_size_learning,:IMG_size_learning])
         # Convert to PyTorch tensor and add channel dimension
         image = torch.from_numpy(image).float().unsqueeze(0)
 
@@ -263,7 +252,7 @@ def loss_fn(model, x, marginal_prob_std, eps=1e-5):
   return loss
 
 
-sigma =  25.0#@param {'type':'number'}
+sigma =  1.5
 marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma)
 diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
 
@@ -275,9 +264,9 @@ data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_worke
 score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
 score_model = score_model.to(DEVICE)
 
-optimizer = Adam(score_model.parameters(), lr=1e-4)
+optimizer = Adam(score_model.parameters(), lr=1e-5)
 
-tqdm_epoch = tqdm.trange(5)
+tqdm_epoch = tqdm.trange(10)
 for epoch in tqdm_epoch:
   avg_loss = 0.
   num_items = 0
@@ -303,66 +292,49 @@ Need to first define:
 #Define the ODE sampler (double click to expand or collapse)
 
 from scipy import integrate
-
+from tqdm.notebook import tqdm
 ## The error tolerance for the black-box ODE solver
 error_tolerance = 1e-5 #@param {'type': 'number'}
-def ode_sampler(score_model,
-                marginal_prob_std,
-                diffusion_coeff,
-                batch_size=64, 
-                atol=error_tolerance, 
-                rtol=error_tolerance, 
-                device='cuda', 
-                z=None,
-                eps=1e-3):
-  """Generate samples from score-based models with black-box ODE solvers.
+def Euler_Maruyama_sampler(score_model, 
+                           marginal_prob_std,
+                           diffusion_coeff, 
+                           batch_size=64, 
+                           num_steps=100, 
+                           device='cuda', 
+                           eps=1e-3):
+  """Generate samples from score-based models with the Euler-Maruyama solver.
 
   Args:
     score_model: A PyTorch model that represents the time-dependent score-based model.
-    marginal_prob_std: A function that returns the standard deviation 
-      of the perturbation kernel.
-    diffusion_coeff: A function that returns the diffusion coefficient of the SDE.
+    marginal_prob_std: A function that gives the standard deviation of
+      the perturbation kernel.
+    diffusion_coeff: A function that gives the diffusion coefficient of the SDE.
     batch_size: The number of samplers to generate by calling this function once.
-    atol: Tolerance of absolute errors.
-    rtol: Tolerance of relative errors.
+    num_steps: The number of sampling steps. 
+      Equivalent to the number of discretized time steps.
     device: 'cuda' for running on GPUs, and 'cpu' for running on CPUs.
-    z: The latent code that governs the final sample. If None, we start from p_1;
-      otherwise, we start from the given z.
     eps: The smallest time step for numerical stability.
+  
+  Returns:
+    Samples.    
   """
-  t = torch.ones(batch_size, device=DEVICE)
-  # Create the latent code
-  if z is None:
-    init_x = torch.randn(batch_size, 1, 256, 256, device=DEVICE) \
-      * marginal_prob_std(t)[:, None, None, None]
-  else:
-    init_x = z
-    
-  shape = init_x.shape
-
-  def score_eval_wrapper(sample, time_steps):
-    """A wrapper of the score-based model for use by the ODE solver."""
-    sample = torch.tensor(sample, device=DEVICE, dtype=torch.float32).reshape(shape)
-    time_steps = torch.tensor(time_steps, device=DEVICE, dtype=torch.float32).reshape((sample.shape[0], ))    
-    with torch.no_grad():    
-      score = score_model(sample, time_steps)
-    return score.cpu().numpy().reshape((-1,)).astype(np.float64)
-  
-  def ode_func(t, x):        
-    """The ODE function for use by the ODE solver."""
-    time_steps = np.ones((shape[0],)) * t    
-    g = diffusion_coeff(torch.tensor(t)).cpu().numpy()
-    return  -0.5 * (g**2) * score_eval_wrapper(x, time_steps)
-  
-  # Run the black-box ODE solver.
-  res = integrate.solve_ivp(ode_func, (1., eps), init_x.reshape(-1).cpu().numpy(), rtol=rtol, atol=atol, method='RK45')  
-  print(f"Number of function evaluations: {res.nfev}")
-  x = torch.tensor(res.y[:, -1], device=DEVICE).reshape(shape)
-
-  return x
+  t = torch.ones(batch_size, device=device)
+  init_x = torch.randn(batch_size, 1, IMG_size_output, IMG_size_output, device=device) \
+    * marginal_prob_std(t)[:, None, None, None]
+  time_steps = torch.linspace(1., eps, num_steps, device=device)
+  step_size = time_steps[0] - time_steps[1]
+  x = init_x
+  with torch.no_grad():
+    for time_step in tqdm(time_steps):      
+      batch_time_step = torch.ones(batch_size, device=device) * time_step
+      g = diffusion_coeff(batch_time_step)
+      mean_x = x + (g**2)[:, None, None, None] * score_model(x, batch_time_step) * step_size
+      x = mean_x + torch.sqrt(step_size) * g[:, None, None, None] * torch.randn_like(x)      
+  # Do not include any noise in the last sampling step.
+  return mean_x
 
 sample_batch_size = 5
-sampler = ode_sampler 
+sampler = Euler_Maruyama_sampler 
 
 ## Generate samples using the specified sampler.
 samples = sampler(score_model, 
@@ -376,3 +348,7 @@ from torchvision.utils import save_image
 
 img1 = samples[0] 
 save_image(img1, 'img1.png')
+
+img5 = samples[4] 
+save_image(img5, 'img5.png')
+#figure out how to plot the loss function vs accuracy for the training and test datasets
