@@ -13,6 +13,7 @@ import functools
 import matplotlib.pyplot as plt 
 from torchvision.utils import save_image
 from PIL import Image
+import argparse
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(DEVICE)
@@ -20,6 +21,12 @@ n_gpus = torch.cuda.device_count()
 print(n_gpus)
 IMG_size_learning = 256
 IMG_size_output = 128
+
+#agrparse variables
+parser = argparse.ArgumentParser()
+parser.add_argument('-e','--nepoch',type=int, required=True)
+parser.add_argument('-b','--batch', type=int, required=True)
+args = parser.parse_args()
 
 # explicit function to normalize array
 def normalize_2d(matrix):
@@ -183,20 +190,12 @@ class ScoreNet(nn.Module):
             
             h = self.act(layer['gnorm'](layer['tconv'](h) + layer['dense'](embed))) #issue
             skip = skips.pop()
-            #rint("h is of size: {}".format(h.shape))
-            #rint("skip is of size: {}".format(skip.shape))
             h = match_tensor_shape(h, skip)
-            #rint("h is of size: {}".format(h.shape))
             h = torch.cat([h, skip], dim=1)
-        # = h.unsqueeze(1) 
         h = self.final_conv(h)
 
         # Normalize and resize
-        #rint("h is of size: {}".format(h.shape))
-        #rint("t is of size: {}".format(t.shape))
         h = h / self.marginal_prob_std(t)[:,None,None,None]
-        #rint("h is of size: {}".format(h.shape))
-        #rint("h is of size: {}".format(h[2:].shape))
         h = F.interpolate(h, size=x.shape[2:], mode='bilinear', align_corners=False)
         return h
 
@@ -282,10 +281,19 @@ sigma =  1.5
 marginal_prob_std_fn = functools.partial(marginal_prob_std, sigma=sigma)
 diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
 
-batch_size = 32
+batch_size = args.batch
 
+#split the data for training and validation
 dataset = CustomImageDataset('/home/ppxjf3/diffusion_GAN/','deltaTb_z12.000_N600_L200.0.dat')
-data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+
+train_size = int(0.8 * len(dataset))  # 80% for training
+val_size = len(dataset) - train_size  # 20% for validation
+train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+#seed so always get the same
 torch.manual_seed(123) 
 score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn)
 score_model = torch.nn.DataParallel(score_model)
@@ -293,11 +301,15 @@ score_model = score_model.to(DEVICE)
 
 optimizer = Adam(score_model.parameters(), lr=1e-5)
 
-tqdm_epoch = tqdm.trange(100)
-for epoch in tqdm_epoch:
+
+tqdm_epoch = tqdm.trange(args.nepoch)
+avg_train_loss = np.empty([args.nepoch])
+avg_validation_loss = np.empty([args.nepoch])
+
+for idx, epoch in enumerate(tqdm_epoch):
   avg_loss = 0.
   num_items = 0
-  for x, y in data_loader:
+  for x, y in train_loader:
     x = x.to(DEVICE)
     loss = loss_fn(score_model, x, marginal_prob_std_fn)
     optimizer.zero_grad()
@@ -306,9 +318,33 @@ for epoch in tqdm_epoch:
     avg_loss += loss.item() * x.shape[0]
     num_items += x.shape[0]
   # Print the averaged training loss so far.
-  tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
+  avg_train_loss[idx] = avg_loss / num_items
+  tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_train_loss[idx]))
+  
+  score_model.eval()  # Set the model to evaluation mode
+  avg_val_loss = 0.
+  num_val_items = 0
+  with torch.no_grad():  # Disable gradient calculation for validation
+    for x, y in val_loader:
+      x = x.to(DEVICE)
+      loss = loss_fn(score_model, x, marginal_prob_std_fn)
+      avg_val_loss += loss.item() * x.shape[0]
+      num_val_items += x.shape[0]
+      
+  avg_validation_loss[idx] = avg_val_loss / num_val_items
+  print(f'Epoch {epoch+1}: Train Loss = {avg_train_loss[idx]:.4f}, Validation Loss = {avg_validation_loss[idx]:.4f}')
 
+#plot training and validation loss - use to check for overfitting
+plt.figure()
+plt.plot(np.arange(1,11,1),avg_validation_loss, label='validation')
+plt.plot(np.arange(1,11,1),avg_train_loss, label='training')
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(frameon=False, fontsize = 14)
+plt.tight_layout()
+plt.savefig('loss_plot.pdf', dpi=330, bbox_inches='tight')
 
+torch.save(score_model.state_dict(),'/home/ppxjf3/diffusion_GAN/diffusion_model.pth')
 """ IMAGE GENERATION  
 
 Need to first define:
