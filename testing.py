@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from torch.optim import Adam
 import functools
 import matplotlib.pyplot as plt 
+from torchvision.utils import save_image
+from PIL import Image
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(DEVICE)
@@ -206,19 +208,22 @@ class CustomImageDataset(Dataset):
         image = np.array(image).reshape(600, 600)
         #image = np.expand_dims(image, axis=0)
         image = normalize_2d(image[:IMG_size_learning,:IMG_size_learning])
+
         # Convert to PyTorch tensor and add channel dimension
         image = torch.from_numpy(image).float().unsqueeze(0)
-
+        
         label = 'z=12.0'
         if self.transform:
             image = self.transform(image)
         if self.target_transform:
             label = self.target_transform(label)
+        
         return image, label
 
     def __del__(self):
         # Close the file when the dataset object is deleted
         self.fid.close()
+        
 def marginal_prob_std(t, sigma):
   """Compute the mean and standard deviation of $p_{0t}(x(t) | x(0))$.
 
@@ -261,6 +266,7 @@ batch_size = 30
 dataset = CustomImageDataset('/home/ppxjf3/diffusion_GAN/','deltaTb_z12.000_N600_L200.0.dat')
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
+torch.manual_seed(123) # seed data set so always get the same output
 score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
 score_model = score_model.to(DEVICE)
 
@@ -293,8 +299,7 @@ Need to first define:
 
 from scipy import integrate
 from tqdm.notebook import tqdm
-## The error tolerance for the black-box ODE solver
-error_tolerance = 1e-5 #@param {'type': 'number'}
+
 def Euler_Maruyama_sampler(score_model, 
                            marginal_prob_std,
                            diffusion_coeff, 
@@ -302,7 +307,8 @@ def Euler_Maruyama_sampler(score_model,
                            num_steps=100, 
                            device='cuda', 
                            eps=1e-3):
-  """Generate samples from score-based models with the Euler-Maruyama solver.
+  """Generate samples from score-based models with the Euler-Maruyama solver and applies
+     a 2nd order Heun’s method
 
   Args:
     score_model: A PyTorch model that represents the time-dependent score-based model.
@@ -319,22 +325,28 @@ def Euler_Maruyama_sampler(score_model,
     Samples.    
   """
   t = torch.ones(batch_size, device=device)
-  init_x = torch.randn(batch_size, 1, IMG_size_output, IMG_size_output, device=device) \
-    * marginal_prob_std(t)[:, None, None, None]
+  x = torch.randn(batch_size, 1, IMG_size_output, IMG_size_output, device=device)* marginal_prob_std(t)[:, None, None, None]
+  
   time_steps = torch.linspace(1., eps, num_steps, device=device)
   step_size = time_steps[0] - time_steps[1]
-  x = init_x
+  
   with torch.no_grad():
-    for time_step in tqdm(time_steps):      
-      batch_time_step = torch.ones(batch_size, device=device) * time_step
+    for i  in tqdm(range(num_steps - 1)):      
+      batch_time_step = time_steps[i].expand(batch_size)
       g = diffusion_coeff(batch_time_step)
-      mean_x = x + (g**2)[:, None, None, None] * score_model(x, batch_time_step) * step_size
-      x = mean_x + torch.sqrt(step_size) * g[:, None, None, None] * torch.randn_like(x)      
-  # Do not include any noise in the last sampling step.
-  return mean_x
+      
+      score = score_model(x, batch_time_step)
+      x_euler = x + (g**2)[:, None, None, None] * score * step_size
+      x_euler += torch.sqrt(step_size) * g[:, None, None, None] * torch.randn_like(x)      
+      
+      # Corrector (Heun)
+      t_next = time_steps[i + 1].expand(batch_size)
+      x = x + 0.5 * (g**2)[:, None, None, None] * (score + score_model(x_euler, t_next)) * step_size
+
+  return x
 
 sample_batch_size = 5
-sampler = Euler_Maruyama_sampler 
+sampler = Euler_Maruyama_sampler #what was used in kerras and camebridge paper 
 
 ## Generate samples using the specified sampler.
 samples = sampler(score_model, 
@@ -344,11 +356,58 @@ samples = sampler(score_model,
                   device=DEVICE)
 
 print(samples.shape)
-from torchvision.utils import save_image
 
 img1 = samples[0] 
 save_image(img1, 'img1.png')
 
 img5 = samples[4] 
 save_image(img5, 'img5.png')
-#figure out how to plot the loss function vs accuracy for the training and test datasets
+
+"""
+Compare power spectra of input vs output
+"""
+import tools21cm as t2c
+from astropy.cosmology import FlatLambdaCDM, LambdaCDM
+
+import astropy.units as u
+cosmo = FlatLambdaCDM(H0=71 * u.km / u.s / u.Mpc, Om0=0.27)
+
+def return_power_spectra(data, length, kbins=12, binning='log'):
+    box_dims = length
+    V = length*length
+
+    p, k = t2c.power_spectrum_1d(data[:,:],  box_dims=box_dims, kbins=kbins, binning = binning, return_n_modes=False)
+    return (p*V*k**3)/(2*np.pi**2), k
+  
+#find variance of power spectra in samples
+power_spec_sample = np.empty([len(samples), 12])
+k_sample = np.empty([12])
+for idx in range(0,len(samples)):
+  power_spec_sample[idx,:], k_sample = return_power_spectra(samples[idx].cpu().detach().numpy(), 200.0*(IMG_size_output/600))
+
+
+#power spectrum for the training data
+power_spec_train = np.empty([len(samples), 12])
+k_train = np.empty([12])
+for idx in range(0,len(samples)):
+  img, lab = dataset.__getitem__(idx)
+  power_spec_train[idx,:], k_train = return_power_spectra(img.cpu().detach().numpy(), 200.0*(IMG_size_learning/600))
+  
+plt.plot(k_sample, np.mean(power_spec_sample, axis=0), label='sample')
+plt.plot(k_train, np.mean(power_spec_train, axis=0), label='train')
+plt.ylabel(r'$\Delta_{\rm 2D} ^2(k)/\rm mK^2$')
+plt.xlabel(r'$k/(\rm Mpc/h)^{-1}$')
+plt.yscale('log')
+plt.xscale('log')
+plt.legend(frameon=False, fontsize = 14)
+plt.tight_layout()
+plt.savefig('power_spec_validation.pdf', dpi=330, bbox_inches='tight')
+
+#figure of sample and input side by side same colourbar and same scale
+fig, ax = plt.subplots(1,2)
+pmc = ax[0].imshow(dataset.__getitem__(0).cpu().detach().numpy()[:IMG_size_output,:IMG_size_output])
+fig.colorbar(pmc, ax=ax[0])
+pmc = ax[1].imshow(samples[idx].cpu().detach().numpy())
+fig.colorbar(pmc, ax=ax[1])
+plt.tight_layout()
+plt.savefig('side_by_side_comparison.pdf', dpi=330, bbox_inches='tight')
