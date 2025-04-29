@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from torchvision.utils import save_image
 from PIL import Image
 import argparse
+from skimage import transform
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(DEVICE)
@@ -195,49 +196,50 @@ class ScoreNet(nn.Module):
         return h
 
 class CustomImageDataset(Dataset):
-    def __init__(self, base, data_name, transform=None, target_transform=None):
-       self.transform = transform
-       self.target_transform = target_transform
-       self.image_loc = os.path.join(base, data_name)
-       # Open the file in binary read mode ('rb')
-       self.fid = open(self.image_loc, 'rb')
-       self.dtype_size = 4  # Assuming float32 data type
+    def __init__(self, base, data_name, datasize, transform=None, target_transform=None):
+        self.transform = transform
+        self.target_transform = target_transform
+        self.image_loc = os.path.join(base, data_name)
+        self.datasize = datasize
+
+        # Memory-map the file: does NOT load into RAM!
+        self.cube = np.memmap(self.image_loc, dtype=np.float32, mode='r')
+        self.cube = self.cube.reshape((600, 600, 600))  # Adjust axis order if needed
+
+        # Precompute slice indices
+        self.slice_list = []
+        for axis in range(3):  # 0=x, 1=y, 2=z
+            for idx in range(600):
+                self.slice_list.append((axis, idx))
 
     def __len__(self):
-       # Get file size and calculate number of images
-       file_size = os.path.getsize(self.image_loc)
-       num_images = file_size // (600 * 600 * self.dtype_size)
-       return num_images # Corrected length calculation
+        return len(self.slice_list)  # 1800 slices
 
     def __getitem__(self, idx):
-        # Calculate the starting position for the slice
-        offset = idx * 600 * 600 * self.dtype_size
+        axis, slice_idx = self.slice_list[idx]
+        #print('axis = {}, idx = {}'.format(axis,idx))
+        if axis == 0:  # x-slice
+            image = self.cube[slice_idx, :, :]
+        elif axis == 1:  # y-slice
+            image = self.cube[:, slice_idx, :]
+        elif axis == 2:  # z-slice
+            image = self.cube[:, :, slice_idx]
+        else:
+            raise ValueError('Invalid axis')
+        label = f'z=12.0'
+        image = transform.resize(image, (self.datasize, self.datasize))
+        image = normalize_2d(image)
 
-        # Seek to the correct position in the file
-        self.fid.seek(offset)
+        # Convert to tensor
+        image = torch.from_numpy(image).float().unsqueeze(0)  # Add channel dimension
 
-        # Read only the required slice
-        data = self.fid.read(600 * 600 * self.dtype_size)
-
-        # Unpack the data for the slice into a NumPy array
-        image = struct.unpack('f' * (600 * 600), data)
-        image = np.array(image).reshape(600, 600)
-        #image = np.expand_dims(image, axis=0)
-        image = normalize_2d(image[:IMG_size_learning,:IMG_size_learning])
-
-        # Convert to PyTorch tensor and add channel dimension
-        image = torch.from_numpy(image).float().unsqueeze(0)
-        
-        label = 'z=12.0'
         if self.transform:
             image = self.transform(image)
         if self.target_transform:
             label = self.target_transform(label)
+
         return image, label
 
-    def __del__(self):
-        # Close the file when the dataset object is deleted
-        self.fid.close()
 def marginal_prob_std(t, sigma):
   """Compute the mean and standard deviation of $p_{0t}(x(t) | x(0))$.
 
@@ -279,7 +281,7 @@ diffusion_coeff_fn = functools.partial(diffusion_coeff, sigma=sigma)
 batch_size = args.batch
 
 #split the data for training and validation
-dataset = CustomImageDataset('/home/ppxjf3/diffusion_GAN/','deltaTb_z12.000_N600_L200.0.dat')
+dataset = CustomImageDataset('/home/ppxjf3/diffusion_GAN/','deltaTb_z12.000_N600_L200.0.dat', IMG_size_learning)
 
 train_size = int(0.8 * len(dataset))  # 80% for training
 val_size = len(dataset) - train_size  # 20% for validation
