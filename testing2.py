@@ -338,6 +338,7 @@ plt.xlabel('epoch')
 plt.legend(frameon=False, fontsize = 14)
 plt.tight_layout()
 plt.savefig('loss_plot.pdf', dpi=330, bbox_inches='tight')
+plt.close()
 
 torch.save(score_model.state_dict(),'/home/ppxjf3/diffusion_GAN/diffusion_model.pth')
 """ IMAGE GENERATION  
@@ -454,7 +455,7 @@ plt.xscale('log')
 plt.legend(frameon=False, fontsize = 14)
 plt.tight_layout()
 plt.savefig('power_spec_validation_class.pdf', dpi=330, bbox_inches='tight')
-
+plt.close()
 #figure of sample and input side by side same colourbar and same scale
 fig, ax = plt.subplots(1,2)
 img, lab = dataset.__getitem__(idx)
@@ -465,3 +466,4 @@ pmc = ax[1].imshow(samples[idx].cpu().detach().numpy()[0,:,:])
 fig.colorbar(pmc, ax=ax[1])
 plt.tight_layout()
 plt.savefig('side_by_side_comparison.pdf', dpi=330, bbox_inches='tight')
+plt.close()
