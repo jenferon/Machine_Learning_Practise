@@ -175,11 +175,6 @@ class ScoreNet(nn.Module):
         skips = []
         h = x
         for layer in self.encoder_layers:
-            #rint("h is of size: {}".format(h.shape))
-            #rint("Conv out:", layer['conv'](h).shape)
-            #rint("Dense out:", layer['dense'](embed).shape)
-            #rint("gnorm out:", layer['gnorm'](layer['conv'](h) + layer['dense'](embed)).shape)
-            #rint("act out:", self.act(layer['gnorm'](layer['conv'](h) + layer['dense'](embed))).shape)
             h = self.act(layer['gnorm'](layer['conv'](h) + layer['dense'](embed)))
             skips.append(h)
         
@@ -336,8 +331,8 @@ for idx, epoch in enumerate(tqdm_epoch):
 
 #plot training and validation loss - use to check for overfitting
 plt.figure()
-plt.plot(np.arange(1,11,1),avg_validation_loss, label='validation')
-plt.plot(np.arange(1,11,1),avg_train_loss, label='training')
+plt.plot(np.arange(1, args.nepoch + 1),avg_validation_loss, label='validation')
+plt.plot(np.arange(1, args.nepoch + 1),avg_train_loss, label='training')
 plt.ylabel('loss')
 plt.xlabel('epoch')
 plt.legend(frameon=False, fontsize = 14)
